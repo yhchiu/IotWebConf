@@ -12,6 +12,7 @@
 #ifndef IotWebConf_h
 #define IotWebConf_h
 
+#include <Arduino.h>
 #include <IotWebConfCompatibility.h>
 
 #ifdef ESP8266
@@ -25,11 +26,19 @@
 #include <DNSServer.h> // -- For captive portal
 
 // -- We might want to place the config in the EEPROM in an offset.
-#define IOTWEBCONF_CONFIG_START 0
+#ifndef IOTWEBCONF_CONFIG_START
+# define IOTWEBCONF_CONFIG_START 0
+#endif
 
 // -- Maximal length of any string used in IotWebConfig configuration (e.g.
-// ssid, password).
-#define IOTWEBCONF_WORD_LEN 33
+// ssid).
+#ifndef IOTWEBCONF_WORD_LEN
+# define IOTWEBCONF_WORD_LEN 33
+#endif
+// -- Maximal length of password used in IotWebConfig configuration.
+#ifndef IOTWEBCONF_PASSWORD_LEN
+# define IOTWEBCONF_PASSWORD_LEN 33
+#endif
 
 // -- IotWebConf tries to connect to the local network for an amount of time
 // before falling back to AP mode.
@@ -44,7 +53,9 @@
 #define IOTWEBCONF_CONFIG_USE_MDNS
 
 // -- Logs progress information to Serial if enabled.
-#define IOTWEBCONF_DEBUG_TO_SERIAL
+#ifndef IOTWEBCONF_DEBUG_DISABLED
+# define IOTWEBCONF_DEBUG_TO_SERIAL
+#endif
 
 // -- Logs passwords to Serial if enabled.
 //#define IOTWEBCONF_DEBUG_PWD_TO_SERIAL
@@ -57,8 +68,13 @@
 #endif
 
 // -- EEPROM config starts with a special prefix of length defined here.
-#define IOTWEBCONF_CONFIG_VESION_LENGTH 4
-#define IOTWEBCONF_DNS_PORT 53
+#ifndef IOTWEBCONF_CONFIG_VERSION_LENGTH
+# define IOTWEBCONF_CONFIG_VERSION_LENGTH 4
+#endif
+
+#ifndef IOTWEBCONF_DNS_PORT
+# define IOTWEBCONF_DNS_PORT 53
+#endif
 
 // -- HTML page fragments
 const char IOTWEBCONF_HTML_HEAD[] PROGMEM         = "<!DOCTYPE html><html lang=\"en\"><head><meta name=\"viewport\" content=\"width=device-width, initial-scale=1, user-scalable=no\"/><title>{v}</title>";
@@ -120,7 +136,7 @@ public:
    *   @type (optional, default="text") - The type of the html input field.
    *       The type="password" has a special handling, as the value will be overwritten in the EEPROM
    *       only if value was provided on the config portal. Because of this logic, "password" type field with
-   *       length more then IOTWEBCONF_WORD_LEN characters are not supported.
+   *       length more then IOTWEBCONF_PASSWORD_LEN characters are not supported.
    *   @placeholder (optional) - Text appear in an empty input box.
    *   @defaultValue (optional) - Value should be pre-filled if none was specified before.
    *   @customHtml (optional) - The text of this parameter will be added into the HTML INPUT field.
@@ -292,7 +308,16 @@ public:
   void setWifiConnectionCallback(std::function<void()> func);
 
   /**
+   * Specify a callback method, that will be called when settings is being changed.
+   * This is very handy if you have other routines, that are modifying the "EEPROM"
+   * parallel to IotWebConf, now this is the time to disable these routines.
+   * Should be called before init()!
+   */
+  void setConfigSavingCallback(std::function<void(int size)> func);
+
+  /**
    * Specify a callback method, that will be called when settings have been changed.
+   * All pending EEPROM manipulations are done by the time this method is called.
    * Should be called before init()!
    */
   void setConfigSavedCallback(std::function<void()> func);
@@ -420,11 +445,20 @@ public:
 
   /**
    * By default IotWebConf starts up in AP mode. Calling this method before the init will force IotWebConf
-   * to connect immediatelly to the configured WiFi network.
+   * to connect immediately to the configured WiFi network.
    * Note, this method only takes effect, when WiFi mode is enabled, thus when a valid WiFi connection is
    * set up, and AP mode is not forced by ConfigPin (see setConfigPin() for details).
    */
   void skipApStartup() { this->_skipApStartup = true; }
+
+  /**
+   * By default IotWebConf will continue startup in WiFi mode, when no configuration request arrived
+   * in AP mode. With this method holding the AP mode can be forced.
+   * Further more, instant AP mode can forced even when we are currently in WiFi mode. 
+   *   @value - When parameter is TRUE AP mode is forced/entered.
+   *     When value is FALSE normal operation will continue.
+   */
+  void forceApMode(boolean value);
 
   /**
    * Get internal parameters, for manual handling.
@@ -485,6 +519,7 @@ private:
   const char* _updatePath = NULL;
   boolean _forceDefaultPassword = false;
   boolean _skipApStartup = false;
+  boolean _forceApMode = false;
   IotWebConfParameter* _firstParameter = NULL;
   IotWebConfParameter _thingNameParameter;
   IotWebConfParameter _apPasswordParameter;
@@ -492,9 +527,9 @@ private:
   IotWebConfParameter _wifiPasswordParameter;
   IotWebConfParameter _apTimeoutParameter;
   char _thingName[IOTWEBCONF_WORD_LEN];
-  char _apPassword[IOTWEBCONF_WORD_LEN];
+  char _apPassword[IOTWEBCONF_PASSWORD_LEN];
   char _wifiSsid[IOTWEBCONF_WORD_LEN];
-  char _wifiPassword[IOTWEBCONF_WORD_LEN];
+  char _wifiPassword[IOTWEBCONF_PASSWORD_LEN];
   char _apTimeoutStr[IOTWEBCONF_WORD_LEN];
   unsigned long _apTimeoutMs = IOTWEBCONF_DEFAULT_AP_MODE_TIMEOUT_MS;
   unsigned long _wifiConnectionTimeoutMs =
@@ -503,6 +538,7 @@ private:
   unsigned long _apStartTimeMs = 0;
   byte _apConnectionStatus = IOTWEBCONF_AP_CONNECTION_STATE_NC;
   std::function<void()> _wifiConnectionCallback = NULL;
+  std::function<void(int)> _configSavingCallback = NULL;
   std::function<void()> _configSavedCallback = NULL;
   std::function<boolean()> _formValidator = NULL;
   std::function<void(const char*, const char*)> _apConnectionHandler =
@@ -522,7 +558,7 @@ private:
   IotWebConfHtmlFormatProvider htmlFormatProviderInstance;
   IotWebConfHtmlFormatProvider* htmlFormatProvider = &htmlFormatProviderInstance;
 
-  void configInit();
+  int configInit();
   boolean configLoad();
   boolean configTestVersion();
   void configSaveConfigVersion();
@@ -534,9 +570,14 @@ private:
 
   void changeState(byte newState);
   void stateChanged(byte oldState, byte newState);
-  boolean isWifiModePossible()
+  boolean mustUseDefaultPassword()
   {
     return this->_forceDefaultPassword || (this->_apPassword[0] == '\0');
+  }
+  boolean mustStayInApMode()
+  {
+    return this->_forceDefaultPassword || (this->_apPassword[0] == '\0') ||
+      this->_wifiSsid[0] == '\0' || this->_forceApMode;
   }
   boolean isIp(String str);
   String toStringIp(IPAddress ip);

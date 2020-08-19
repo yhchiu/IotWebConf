@@ -40,6 +40,7 @@ IotWebConfParameter::IotWebConfParameter(
   this->defaultValue = defaultValue;
   this->customHtml = customHtml;
   this->visible = visible;
+  this->errorMessage = NULL;
 }
 IotWebConfParameter::IotWebConfParameter(
     const char* id, char* valueBuffer, int length, const char* customHtml,
@@ -79,9 +80,9 @@ IotWebConf::IotWebConf(
   itoa(this->_apTimeoutMs / 1000, this->_apTimeoutStr, 10);
 
   this->_thingNameParameter = IotWebConfParameter("Thing name", "iwcThingName", this->_thingName, IOTWEBCONF_WORD_LEN);
-  this->_apPasswordParameter = IotWebConfParameter("AP password", "iwcApPassword", this->_apPassword, IOTWEBCONF_WORD_LEN, "password");
+  this->_apPasswordParameter = IotWebConfParameter("AP password", "iwcApPassword", this->_apPassword, IOTWEBCONF_PASSWORD_LEN, "password");
   this->_wifiSsidParameter = IotWebConfParameter("WiFi SSID", "iwcWifiSsid", this->_wifiSsid, IOTWEBCONF_WORD_LEN);
-  this->_wifiPasswordParameter = IotWebConfParameter("WiFi password", "iwcWifiPassword", this->_wifiPassword, IOTWEBCONF_WORD_LEN, "password");
+  this->_wifiPasswordParameter = IotWebConfParameter("WiFi password", "iwcWifiPassword", this->_wifiPassword, IOTWEBCONF_PASSWORD_LEN, "password");
   this->_apTimeoutParameter = IotWebConfParameter("Startup delay (seconds)", "iwcApTimeout", this->_apTimeoutStr, IOTWEBCONF_WORD_LEN, "number", NULL, NULL, "min='1' max='600'", false);
   this->addParameter(&this->_thingNameParameter);
   this->addParameter(&this->_apPasswordParameter);
@@ -127,7 +128,6 @@ boolean IotWebConf::init()
   }
 
   // -- Load configuration from EEPROM.
-  this->configInit();
   boolean validConfig = this->configLoad();
   if (!validConfig)
   {
@@ -183,7 +183,7 @@ bool IotWebConf::addParameter(IotWebConfParameter* parameter)
   return true;
 }
 
-void IotWebConf::configInit()
+int IotWebConf::configInit()
 {
   int size = 0;
   IotWebConfParameter* current = this->_firstParameter;
@@ -197,8 +197,7 @@ void IotWebConf::configInit()
   Serial.println(size);
 #endif
 
-  EEPROM.begin(
-      IOTWEBCONF_CONFIG_START + IOTWEBCONF_CONFIG_VESION_LENGTH + size);
+  return size;
 }
 
 /**
@@ -206,10 +205,14 @@ void IotWebConf::configInit()
  */
 boolean IotWebConf::configLoad()
 {
+  int size = this->configInit();
+  EEPROM.begin(
+    IOTWEBCONF_CONFIG_START + IOTWEBCONF_CONFIG_VERSION_LENGTH + size);
+
   if (this->configTestVersion())
   {
     IotWebConfParameter* current = this->_firstParameter;
-    int start = IOTWEBCONF_CONFIG_START + IOTWEBCONF_CONFIG_VESION_LENGTH;
+    int start = IOTWEBCONF_CONFIG_START + IOTWEBCONF_CONFIG_VERSION_LENGTH;
     while (current != NULL)
     {
       if (current->getId() != NULL)
@@ -261,13 +264,23 @@ boolean IotWebConf::configLoad()
     IOTWEBCONF_DEBUG_LINE(F("Wrong config version."));
     return false;
   }
+
+  EEPROM.end();
 }
 
 void IotWebConf::configSave()
 {
+  int size = this->configInit();
+  if (this->_configSavingCallback != NULL)
+  {
+    this->_configSavingCallback(size);
+  }
+  EEPROM.begin(
+    IOTWEBCONF_CONFIG_START + IOTWEBCONF_CONFIG_VERSION_LENGTH + size);
+
   this->configSaveConfigVersion();
   IotWebConfParameter* current = this->_firstParameter;
-  int start = IOTWEBCONF_CONFIG_START + IOTWEBCONF_CONFIG_VESION_LENGTH;
+  int start = IOTWEBCONF_CONFIG_START + IOTWEBCONF_CONFIG_VERSION_LENGTH;
   while (current != NULL)
   {
     if (current->getId() != NULL)
@@ -299,7 +312,7 @@ void IotWebConf::configSave()
     }
     current = current->_nextParameter;
   }
-  EEPROM.commit();
+  EEPROM.end();
 
   this->_apTimeoutMs = atoi(this->_apTimeoutStr) * 1000;
 
@@ -326,7 +339,7 @@ void IotWebConf::writeEepromValue(int start, char* valueBuffer, int length)
 
 boolean IotWebConf::configTestVersion()
 {
-  for (byte t = 0; t < IOTWEBCONF_CONFIG_VESION_LENGTH; t++)
+  for (byte t = 0; t < IOTWEBCONF_CONFIG_VERSION_LENGTH; t++)
   {
     if (EEPROM.read(IOTWEBCONF_CONFIG_START + t) != this->_configVersion[t])
     {
@@ -338,7 +351,7 @@ boolean IotWebConf::configTestVersion()
 
 void IotWebConf::configSaveConfigVersion()
 {
-  for (byte t = 0; t < IOTWEBCONF_CONFIG_VESION_LENGTH; t++)
+  for (byte t = 0; t < IOTWEBCONF_CONFIG_VERSION_LENGTH; t++)
   {
     EEPROM.write(IOTWEBCONF_CONFIG_START + t, this->_configVersion[t]);
   }
@@ -347,6 +360,11 @@ void IotWebConf::configSaveConfigVersion()
 void IotWebConf::setWifiConnectionCallback(std::function<void()> func)
 {
   this->_wifiConnectionCallback = func;
+}
+
+void IotWebConf::setConfigSavingCallback(std::function<void(int size)> func)
+{
+  this->_configSavingCallback = func;
 }
 
 void IotWebConf::setConfigSavedCallback(std::function<void()> func)
@@ -438,7 +456,7 @@ void IotWebConf::handleConfig()
           pitem.replace("{t}", current->type);
           pitem.replace("{i}", current->getId());
           pitem.replace("{p}", current->placeholder == NULL ? "" : current->placeholder);
-          snprintf(parLength, 5, "%d", current->getLength());
+          snprintf(parLength, 5, "%d", current->getLength()-1);
           pitem.replace("{l}", parLength);
           if (strcmp("password", current->type) == 0)
           {
@@ -499,7 +517,7 @@ void IotWebConf::handleConfig()
   {
     // -- Save config
     IOTWEBCONF_DEBUG_LINE(F("Updating configuration"));
-    char temp[IOTWEBCONF_WORD_LEN];
+    static char temp[IOTWEBCONF_PASSWORD_LEN];
 
     IotWebConfParameter* current = this->_firstParameter;
     while (current != NULL)
@@ -507,9 +525,9 @@ void IotWebConf::handleConfig()
       if ((current->getId() != NULL) && (current->visible))
       {
         if ((strcmp("password", current->type) == 0) &&
-            (current->getLength() <= IOTWEBCONF_WORD_LEN))
+            (current->getLength() <= IOTWEBCONF_PASSWORD_LEN))
         {
-          // TODO: Passwords longer than IOTWEBCONF_WORD_LEN not supported.
+          // TODO: Passwords longer than IOTWEBCONF_PASSWORD_LEN not supported.
           this->readParamValue(current->getId(), temp, current->getLength());
           if (temp[0] != '\0')
           {
@@ -582,7 +600,7 @@ void IotWebConf::handleConfig()
     {
       page += F("Return to <a href='/'>home page</a>.");
     }
-    page += htmlFormatProvider->getHeadEnd();
+    page += htmlFormatProvider->getEnd();
 
     this->_server->sendHeader("Content-Length", String(page.length()));
     this->_server->send(200, "text/html; charset=UTF-8", page);
@@ -743,12 +761,9 @@ void IotWebConf::delay(unsigned long m)
   while (m > millis() - delayStart)
   {
     this->doLoop();
-#ifdef ESP8266
-    delay(1); // -- Note: 1ms might not be enough to perform a full yield. So
-              // 'yeild' in 'doLoop' is eventually a good idea.
-#else
+    // -- Note: 1ms might not be enough to perform a full yield. So
+    // 'yeild' in 'doLoop' is eventually a good idea.
     delayMicroseconds(1000);
-#endif
   }
 }
 
@@ -762,7 +777,7 @@ void IotWebConf::doLoop()
     byte startupState = IOTWEBCONF_STATE_AP_MODE;
     if (this->_skipApStartup)
     {
-      if (isWifiModePossible())
+      if (mustStayInApMode())
       {
         IOTWEBCONF_DEBUG_LINE(
             F("SkipApStartup is requested, but either no WiFi was set up, or "
@@ -822,7 +837,7 @@ void IotWebConf::changeState(byte newState)
     {
       // -- In AP mode we must override the default AP password. Otherwise we stay
       // in STATE_NOT_CONFIGURED.
-      if (isWifiModePossible())
+      if (mustUseDefaultPassword())
       {
 #ifdef IOTWEBCONF_DEBUG_TO_SERIAL
         if (this->_forceDefaultPassword)
@@ -891,6 +906,11 @@ void IotWebConf::stateChanged(byte oldState, byte newState)
       {
         stopAp();
       }
+      if ((oldState == IOTWEBCONF_STATE_BOOT) && (this->_updateServer != NULL))
+      {
+        // We've skipped AP mode, so update server needs to be set up now.
+        this->_updateServer->setup(this->_server, this->_updatePath);
+      }
       this->blinkInternal(1000, 50);
 #ifdef IOTWEBCONF_DEBUG_TO_SERIAL
       Serial.print("Connecting to [");
@@ -928,8 +948,7 @@ void IotWebConf::stateChanged(byte oldState, byte newState)
 
 void IotWebConf::checkApTimeout()
 {
-  if ((this->_wifiSsid[0] != '\0') && (this->_apPassword[0] != '\0') &&
-      (!this->_forceDefaultPassword))
+  if ( !mustStayInApMode() )
   {
     // -- Only move on, when we have a valid WifF and AP configured.
     if ((this->_apConnectionStatus == IOTWEBCONF_AP_CONNECTION_STATE_DC) ||
@@ -1101,6 +1120,42 @@ void IotWebConf::doBlink()
       this->_blinkState = 1 - this->_blinkState;
       this->_lastBlinkTime = now;
       digitalWrite(this->_statusPin, this->_blinkState);
+    }
+  }
+}
+
+void IotWebConf::forceApMode(boolean doForce)
+{
+  if (this->_forceApMode == doForce)
+  {
+     // Already in the requested mode;
+    return;
+  }
+
+  this->_forceApMode = doForce;
+  if (doForce)
+  {
+    if (this->_state != IOTWEBCONF_STATE_AP_MODE)
+    {
+      IOTWEBCONF_DEBUG_LINE(F("Start forcing AP mode"));
+      WiFi.disconnect(true);
+      this->changeState(IOTWEBCONF_STATE_AP_MODE);
+    }
+  }
+  else
+  {
+    if (this->_state == IOTWEBCONF_STATE_AP_MODE)
+    {
+      if (this->mustStayInApMode())
+      {
+        IOTWEBCONF_DEBUG_LINE(F("Requested stopping to force AP mode, but we cannot leave the AP mode now."));
+      }
+      else
+      {
+        IOTWEBCONF_DEBUG_LINE(F("Stopping AP mode force."));
+        this->changeState(IOTWEBCONF_STATE_CONNECTING);
+      }
+      
     }
   }
 }
